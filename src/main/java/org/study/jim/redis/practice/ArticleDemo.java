@@ -39,7 +39,6 @@ public class ArticleDemo {
         conn.expire(voteKey,ONE_WEEK_IN_SECONDS);
         return articleId;
     }
-
     //2、对已生成的文章进行投票
     public static void articleVote(Jedis conn,String user,String articleKey){
 
