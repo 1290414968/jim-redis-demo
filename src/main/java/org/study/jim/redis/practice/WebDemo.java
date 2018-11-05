@@ -1,5 +1,8 @@
 package org.study.jim.redis.practice;
+import com.google.gson.Gson;
 import redis.clients.jedis.Jedis;
+import redis.clients.jedis.Tuple;
+
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
@@ -11,7 +14,7 @@ public class WebDemo {
     private static final String CART_PREFIX = "cart:";
     private static final String DELAY_KEY = "delay:";
     private static final String SCHEDULE_KEY = "schedule:";
-
+    private static final String INV_KEY = "inv:";
     //登录的cookie存储
     public static void testLoginCookie(Jedis conn) throws InterruptedException {
         String token = UUID.randomUUID().toString();
@@ -55,8 +58,53 @@ public class WebDemo {
         printCart(conn,token);
     }
     //缓存行
+    public static void testCacheRows(Jedis conn) throws InterruptedException {
+        scheduleRowCache(conn,"itemX",5);
+        System.out.println("Our schedule looks like:");
+        Set<Tuple> tupleSet =  conn.zrangeWithScores(SCHEDULE_KEY,0,-1);
+        for (Tuple tuple : tupleSet){
+            System.out.println("  " + tuple.getElement() + ", " + tuple.getScore());
+        }
+        CacheRowsThread cacheRowsThread = new CacheRowsThread(conn);
+        cacheRowsThread.start();
+        Thread.sleep(1000);
+        System.out.println("Our cached data looks like:");
+        String r = conn.get(INV_KEY+"itemX");
+        System.out.println(r);
+        assert r != null;
+        System.out.println();
+        //执行5秒的缓存
+        System.out.println("We'll check again in 5 seconds...");
+        Thread.sleep(5000);
+        System.out.println("Notice that the data has changed...");
+        String r2 = conn.get(INV_KEY+"itemX");
+        System.out.println(r2);
+        System.out.println();
+        assert r2 != null;
+        assert !r.equals(r2);
 
+        //清楚缓存行
+        scheduleRowCache(conn, "itemX", -1);
+
+        Thread.sleep(1000);
+        r = conn.get(INV_KEY+"itemX");
+        System.out.println("The cache was cleared? " + (r == null));
+        assert r == null;
+
+        //退出
+        cacheRowsThread.quit();
+        Thread.sleep(2000);
+        if (cacheRowsThread.isAlive()){
+            throw new RuntimeException("The database caching thread is still alive?!?");
+        }
+    }
+    private static void scheduleRowCache(Jedis conn,String rowId,int delay){
+        conn.zadd(DELAY_KEY,delay,rowId);
+        conn.zadd(SCHEDULE_KEY,System.currentTimeMillis()/1000,rowId);
+    }
     //缓存分析之后的浏览量高的请求
+
+    //打印购物车数据
     public static void printCart(Jedis conn,String sessionId){
         Map<String,String> r =  conn.hgetAll(CART_PREFIX+sessionId);
         System.out.println("Our shopping cart currently has:");
@@ -166,6 +214,60 @@ public class WebDemo {
                 //删除最近登录的令牌
                 conn.hdel(RECENT_KEY,tokens);
             }
+        }
+    }
+    public static class CacheRowsThread extends Thread{
+        private Jedis conn;
+        private boolean quit;
+        public CacheRowsThread(Jedis conn) {
+            this.conn = conn;
+        }
+        public void quit() {
+            quit = true;
+        }
+        @Override
+        public void run() {
+            Gson gson = new Gson();
+            while (!quit){
+                //取出调度集合中的所有行及缓存时间
+                Set<Tuple> range = conn.zrangeWithScores(SCHEDULE_KEY,0,0);
+                Tuple next = range.size() > 0 ? range.iterator().next() : null;
+                long now = System.currentTimeMillis() / 1000;
+                if (next == null || next.getScore() > now){ //为了控制能缓存行进行时间的判断，条件成立则进行sleep(50) 再继续循环
+                    try {
+                        sleep(50);
+                    }catch(InterruptedException ie){
+                        Thread.currentThread().interrupt();
+                    }
+                    continue;
+                }
+                String rowId = next.getElement();
+                double delay = conn.zscore(DELAY_KEY,rowId);
+                if(delay<=0){//当设置为0时，删除相关的数据
+                    conn.zrem(DELAY_KEY,rowId);
+                    conn.zrem(SCHEDULE_KEY,rowId);
+                    conn.del(INV_KEY+rowId);
+                    continue;
+                }
+                Inventory row = Inventory.get(rowId);
+                conn.zadd(SCHEDULE_KEY, now + delay, rowId);
+                conn.set(INV_KEY + rowId, gson.toJson(row));
+            }
+        }
+    }
+    public static class Inventory {
+        private String id;
+        private String data;
+        private long time;
+
+        private Inventory (String id) {
+            this.id = id;
+            this.data = "data to cache...";
+            this.time = System.currentTimeMillis() / 1000;
+        }
+
+        public static Inventory get(String id) {
+            return new Inventory(id);
         }
     }
 }
