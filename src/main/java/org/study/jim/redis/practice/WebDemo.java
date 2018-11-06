@@ -3,10 +3,10 @@ import com.google.gson.Gson;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.Tuple;
 
-import java.util.ArrayList;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.*;
+
 public class WebDemo {
     private static final String LOGIN_KEY = "login:";
     private static final String RECENT_KEY = "recent:";
@@ -15,6 +15,7 @@ public class WebDemo {
     private static final String DELAY_KEY = "delay:";
     private static final String SCHEDULE_KEY = "schedule:";
     private static final String INV_KEY = "inv:";
+    private static final String CACHE_PREFIX = "cache:";
     //登录的cookie存储
     public static void testLoginCookie(Jedis conn) throws InterruptedException {
         String token = UUID.randomUUID().toString();
@@ -98,12 +99,83 @@ public class WebDemo {
             throw new RuntimeException("The database caching thread is still alive?!?");
         }
     }
+    //定时缓存行
     private static void scheduleRowCache(Jedis conn,String rowId,int delay){
         conn.zadd(DELAY_KEY,delay,rowId);
         conn.zadd(SCHEDULE_KEY,System.currentTimeMillis()/1000,rowId);
     }
-    //缓存分析之后的浏览量高的请求
-
+    //缓存请求+浏览量高的逻辑判断
+    public static void testCacheRequest(Jedis conn){
+        String token = UUID.randomUUID().toString();
+        Callback callback = new Callback() {
+            public String call(String request) {
+                return "content for :"+request;
+            }
+        };
+        updateToken(conn,token,"cacheUser1","cacheItem1");
+        String url = "http://test.com/?item=itemX";
+        System.out.println("We are going to cache a simple request against " + url);
+        //缓存请求url
+        String result = cacheRequest(conn,url,callback);
+        System.out.println("We got initial content:\n" + result);
+        System.out.println();
+        System.out.println("To test that we've cached the request, we'll pass a bad callback");
+        //缓存请求url，上次已缓存可以不传递callback，直接获取到缓存内容
+        String result2 = cacheRequest(conn, url, null);
+        System.out.println("We ended up getting the same response!\n" + result2);
+        assert result.equals(result2);
+        //判断是否可以缓存
+        assert !canCache(conn, "http://test.com/");
+        assert !canCache(conn, "http://test.com/?item=itemX&_=1234536");
+    }
+    private static String cacheRequest(Jedis conn,String request,Callback callback){
+        if (!canCache(conn, request)){
+            return callback != null ? callback.call(request) : null;
+        }
+        String pageKey = CACHE_PREFIX+hashRequest(request);
+        //请求对应的页面内容
+        String content = conn.get(pageKey);
+        //如果页面没有缓存则进行缓存返回
+        if (content == null && callback != null){
+            content = callback.call(request);
+            conn.setex(pageKey, 300, content);
+        }
+        return content;
+    }
+    private static boolean canCache(Jedis conn,String request){
+        try {
+            URL url = new URL(request);
+            HashMap<String,String> params = new HashMap<String,String>();
+            if (url.getQuery() != null){
+                for (String param : url.getQuery().split("&")){
+                    String[] pair = param.split("=", 2);
+                    params.put(pair[0], pair.length == 2 ? pair[1] : null);
+                }
+            }
+            //获取请求对应的物品ID
+            String itemId = extractItemId(params);
+            if (itemId == null || isDynamic(params)) {
+                return false;
+            }
+            //获取物品的浏览量排名值
+            Long rank = conn.zrank(VIEW_PREFIX, itemId);
+            return rank != null && rank < 10000;
+        } catch (MalformedURLException e) {
+            return false;
+        }
+    }
+    public static boolean isDynamic(Map<String,String> params) {
+        return params.containsKey("_");
+    }
+    public static String extractItemId(Map<String,String> params) {
+        return params.get("item");
+    }
+    public static String hashRequest(String request) {
+        return String.valueOf(request.hashCode());
+    }
+    public static interface Callback {
+        public String call(String request);
+    }
     //打印购物车数据
     public static void printCart(Jedis conn,String sessionId){
         Map<String,String> r =  conn.hgetAll(CART_PREFIX+sessionId);
