@@ -2,15 +2,39 @@ package org.study.jim.redis.practice;
 
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.Transaction;
+import redis.clients.jedis.Tuple;
 
 import java.util.List;
+import java.util.Set;
 
 public class PurchaseItemDemo {
     private static String INVENTORY_PREFIX = "inventory:";
     private static String MARKET_KEY = "market:";
     private static String USER_KEY = "users:";
+    public static void testListItem(Jedis conn,boolean nested){
+        if(!nested){
+            System.out.println("\n----- testListItem -----");
+        }
+        String seller = "userX";
+        String item = "itemX";
+        conn.sadd(INVENTORY_PREFIX+seller,item);
+        //卖者包裹里的物品列表
+        Set<String> i =  conn.smembers(INVENTORY_PREFIX+seller);
+        System.out.println("The user's inventory has:");
+        for (String member : i){
+            System.out.println("  " + member);
+        }
+       boolean listResult = listItem(conn,item,seller,10);
+       System.out.println("in result->"+listResult);
+       //列出卖场中的物品及价格
+        Set<Tuple> r = conn.zrangeWithScores(MARKET_KEY, 0, -1);
+        System.out.println("The market contains:");
+        for (Tuple tuple : r){
+            System.out.println("  " + tuple.getElement() + ", " + tuple.getScore());
+        }
+    }
     //使用Transaction 命令来处理事务逻辑
-    //列出买卖市场中的物品
+    //列出买卖市场中的物品，将物品加入卖场
     public static boolean listItem(Jedis conn,String itemId,String sellerId,double price){
         String inventory = INVENTORY_PREFIX+sellerId;
         String item = itemId+"."+sellerId;
